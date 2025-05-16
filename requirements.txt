@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+accelerate
+torch
+torchvision
+soundfile
+qwen-omni-utils[decord]
+pillow
