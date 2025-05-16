@@ -1,0 +1,24 @@
+services:
+  qwen-api:
+    build: .
+    container_name: qwen-api
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./models/Qwen/Qwen2.5-Omni-3B:/models/Qwen2.5-Omni-3B
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open-webui
+    environment:
+      - OPENAI_API_KEY=sk-xxx
+      - OPENAI_API_BASE_URL=http://qwen-api:8000/v1
+    ports:
+      - "4000:8080"
+    depends_on:
+      - qwen-api
+    volumes:
+      - open-webui-data:/app/backend/data
+
+volumes:
+  open-webui-data:
