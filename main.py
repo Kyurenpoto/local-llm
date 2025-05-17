@@ -1,15 +1,17 @@
 import torch
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.exception_handlers import RequestValidationError
 from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, field_validator
 from typing import List, Optional, Dict, Any, Union
-from transformers import Qwen2_5OmniForConditionalGeneration, Qwen2_5OmniProcessor
+from transformers import Qwen2_5OmniForConditionalGeneration, Qwen2_5OmniProcessor, TextIteratorStreamer
 from qwen_omni_utils import process_mm_info
 import base64
 import io
 import soundfile as sf
+import json
+import asyncio
 
 app = FastAPI()
 
@@ -90,49 +92,56 @@ async def create_chat_completion(request: ChatCompletionRequest):
         use_audio_in_video=True
     ).to(model.device).to(model.dtype)
 
-    with torch.no_grad():
-        text_ids, audio = model.generate(
+    streamer = TextIteratorStreamer(processor.tokenizer, skip_special_tokens=True)
+
+    text_ids_holder = {}
+
+    async def generate_text():
+        text_ids, audio = await asyncio.to_thread(
+            model.generate,
             **inputs,
             use_audio_in_video=True,
-            max_new_tokens=request.max_tokens,
-            max_time=60
+            max_time=60,
+            streamer=streamer,
         )
-        
-    output_texts = processor.batch_decode(
-        text_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False
-    )
-    
-    #audio_base64 = None
-    #if audio is not None:
-    #    buf = io.BytesIO()
-    #    sf.write(buf, audio.cpu().numpy(), samplerate=24000, format="wav")
-    #    buf.seek(0)
-    #    audio_base64 = base64.b64encode(buf.read()).decode("utf-8")
+        text_ids_holder["text_ids"] = text_ids
+        text_ids_holder["audio"] = audio
 
-    response = {
-        "id": "chatcmpl-1234",
-        "object": "chat.completion",
-        "choices": [
-            {
-                "index": i,
-                "message": {
-                    "role": "assistant",
-                    "content": extract_last_assistant_reply(msg)
-                },
-                "finish_reason": "stop"
-            }
-            for i, msg in enumerate(output_texts)
-        ],
-        "model": request.model,
-        "usage": {
-            "prompt_tokens": len(inputs["input_ids"][0]),
-            "completion_tokens": text_ids.shape[-1],
-            "total_tokens": len(inputs["input_ids"][0]) + text_ids.shape[-1]
-        }
-    }
-    #if audio_base64:
-    #    response["audio"] = audio_base64
-    
-    print(f"Response: {response}")
+    generate_task = asyncio.create_task(generate_text())
 
-    return response
+    async def stream():
+        response_buffer = ""
+        last_sent = ""
+        while not generate_task.done() or streamer:
+            for new_text in streamer:
+                response_buffer += new_text
+                last_reply = extract_last_assistant_reply(response_buffer)
+                to_send = last_reply[len(last_sent):]
+                data = {
+                    "choices": [{
+                        "delta": {"content": to_send},
+                        "index": 0,
+                        "finish_reason": None
+                    }]
+                }
+                yield f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+                last_sent = last_reply
+            await asyncio.sleep(0.01)
+        #audio = text_ids_holder.get("audio")
+        #if audio is not None:
+        #    buf = io.BytesIO()
+        #    sf.write(buf, audio.cpu().numpy(), samplerate=24000, format="wav")
+        #    buf.seek(0)
+        #    audio_base64 = base64.b64encode(buf.read()).decode("utf-8")
+        #    data = {
+        #        "choices": [{
+        #            "delta": {"audio": audio_base64},
+        #            "index": 0,
+        #            "finish_reason": None
+        #        }]
+        #    }
+        #    yield f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+        yield 'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(stream(), media_type="text/event-stream")
