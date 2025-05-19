@@ -72,17 +72,7 @@ class ChatCompletionRequest(BaseModel):
     model: str
     messages: List[Message]
     max_tokens: Optional[int] = 4096
-    temperature: Optional[float] = 0.3
-
-def extract_last_assistant_reply(text):
-    idx = text.rfind("<|assistant|>")
-    if idx != -1:
-        text = text[idx + len("<|assistant|>"):]
-        
-    idx = text.rfind("<|end|>")
-    if idx != -1:
-        text = text[:idx]
-    return text.strip()
+    temperature: Optional[float] = 1.0
 
 def build_prompt_and_inputs(messages):
     images = []
@@ -113,7 +103,6 @@ def build_prompt_and_inputs(messages):
                     pass
         new_messages.append({"role": msg["role"], "content": content_str})
 
-    new_messages.append({"role": "assistant", "content": ""})
     return new_messages, images, audios
 
 @app.post("/v1/chat/completions")
@@ -143,7 +132,9 @@ async def create_chat_completion(request: ChatCompletionRequest):
     inputs = {k: v for k, v in inputs.items()
               if v is not None and not (hasattr(v, 'numel') and v.numel() == 0)}
 
-    streamer = TextIteratorStreamer(processor.tokenizer, skip_special_tokens=False)
+    streamer = TextIteratorStreamer(
+        processor.tokenizer, skip_special_tokens=True, skip_prompt=True
+    )
 
     async def generate_text():
         try:
@@ -166,13 +157,11 @@ async def create_chat_completion(request: ChatCompletionRequest):
 
     async def stream():
         logging.info("[stream] Starting streaming response...")
-        response_buffer_prev = ""
-        response_buffer = ""
+        last_reply = ""
         last_sent = ""
         for new_text in streamer:
-            response_buffer += new_text
-            logging.debug(f"[stream] response_bufffer={response_buffer}")
-            last_reply = extract_last_assistant_reply(response_buffer)
+            last_reply += new_text
+            logging.debug(f"[stream] last_reply={last_reply}")
             to_send = last_reply[len(last_sent):]
             if to_send:
                 data = {
