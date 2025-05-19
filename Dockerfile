@@ -2,12 +2,10 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-COPY ./requirements.txt .
-COPY ./main.py .
 RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
+COPY ./requirements.txt .
 RUN pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
-RUN pip uninstall -y transformers && \
-    pip install --no-cache-dir git+https://github.com/huggingface/transformers@v4.51.3-Qwen2.5-Omni-preview
+COPY ./main.py .
 
 EXPOSE 8000
 
