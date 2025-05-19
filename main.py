@@ -73,6 +73,7 @@ class ChatCompletionRequest(BaseModel):
     messages: List[Message]
     max_tokens: Optional[int] = 4096
     temperature: Optional[float] = 1.0
+    stream: Optional[bool] = False
 
 def build_prompt_and_inputs(messages):
     images = []
@@ -105,33 +106,22 @@ def build_prompt_and_inputs(messages):
 
     return new_messages, images, audios
 
-@app.post("/v1/chat/completions")
-async def create_chat_completion(request: ChatCompletionRequest):
-    conversation = [
-        {"role": m.role, "content": m.content}
-        for m in request.messages
-    ]
-    
-    logging.info(f"[completion] Received request: {request.json()}")
-    
-    new_conversation, images, audios = build_prompt_and_inputs(conversation)
-    
-    prompt = processor.tokenizer.apply_chat_template(
-        new_conversation, tokenize=False, add_generation_prompt=True
-    )
-    
-    logging.debug(f"[complettion] Prompt: {prompt}")
-    
-    processor_kwargs = {"text": prompt, "return_tensors": "pt"}
-    if images:
-        processor_kwargs["images"] = images
-    if audios:
-        processor_kwargs["audio"] = audios
-    
-    inputs = processor(**processor_kwargs).to(model.device)
-    inputs = {k: v for k, v in inputs.items()
-              if v is not None and not (hasattr(v, 'numel') and v.numel() == 0)}
+async def normal_completion(generate_kwargs):
+    try:
+        logging.info("[model] Generating response...")
+        outputs = await asyncio.to_thread(
+            model.generate,
+            **generate_kwargs,
+        )
+        logging.info("[model] Generation task done.")
+    except Exception as e:
+        logging.error(f"[model] Error during generation: {e}")
+        raise e
 
+    decoded_output = processor.batch_decode(outputs, skip_special_tokens=True)
+    return decoded_output[0]
+
+async def stream_completion(generate_kwargs):
     streamer = TextIteratorStreamer(
         processor.tokenizer, skip_special_tokens=True, skip_prompt=True
     )
@@ -140,14 +130,8 @@ async def create_chat_completion(request: ChatCompletionRequest):
         try:
             await asyncio.to_thread(
                 model.generate,
-                **inputs,
-                max_new_tokens=request.max_tokens,
-                temperature=request.temperature,
-                do_sample=True,
+                **generate_kwargs,
                 streamer=streamer,
-                generation_config=generation_config,
-                # https://huggingface.co/microsoft/Phi-4-multimodal-instruct/discussions/46
-                num_logits_to_keep=1
             )
         except Exception as e:
             logging.error(f"[model] Error during generation: {e}")
@@ -180,3 +164,57 @@ async def create_chat_completion(request: ChatCompletionRequest):
         await asyncio.sleep(0)
 
     return StreamingResponse(stream(), media_type="text/event-stream")
+
+@app.post("/v1/chat/completions")
+async def create_chat_completion(request: ChatCompletionRequest):
+    conversation = [
+        {"role": m.role, "content": m.content}
+        for m in request.messages
+    ]
+    
+    logging.debug(f"[completion] Received request: {request.json()}")
+    
+    new_conversation, images, audios = build_prompt_and_inputs(conversation)
+    
+    prompt = processor.tokenizer.apply_chat_template(
+        new_conversation, tokenize=False, add_generation_prompt=True
+    )
+    
+    logging.debug(f"[completion] Prompt: {prompt}")
+    
+    processor_kwargs = {"text": prompt, "return_tensors": "pt"}
+    if images:
+        processor_kwargs["images"] = images
+    if audios:
+        processor_kwargs["audio"] = audios
+    
+    inputs = processor(**processor_kwargs).to(model.device)
+    inputs = {k: v for k, v in inputs.items()
+              if v is not None and not (hasattr(v, 'numel') and v.numel() == 0)}
+
+    generate_kwargs = {
+        **inputs,
+        "max_new_tokens": request.max_tokens,
+        "temperature": request.temperature,
+        "do_sample": True,
+        "generation_config": generation_config,
+        # https://huggingface.co/microsoft/Phi-4-multimodal-instruct/discussions/46
+        "num_logits_to_keep": 1
+    }
+
+    if request.stream:
+        return await stream_completion(generate_kwargs)
+    else:
+        response = await normal_completion(generate_kwargs)
+        return JSONResponse(content={
+            "id": "phi4-mm-1234",
+            "object": "chat.completion",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": response
+                },
+                "finish_reason": "stop"
+            }]
+        })
