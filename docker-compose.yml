@@ -6,6 +6,7 @@ services:
       - "8000:8000"
     volumes:
       - ./models/Phi-4-multimodal-instruct:/models/Phi-4-multimodal-instruct
+    cpus: 4.0
 
   open-webui:
     image: ghcr.io/open-webui/open-webui:main

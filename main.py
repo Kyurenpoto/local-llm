@@ -26,6 +26,7 @@ model = AutoModelForCausalLM.from_pretrained(
     trust_remote_code=True,
     _attn_implementation='eager',
 ).to("cpu")
+model = torch.compile(model)
 processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True, use_fast=True)
 generation_config = GenerationConfig.from_pretrained(model_path, 'generation_config.json')
 
